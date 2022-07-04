@@ -12,13 +12,23 @@ def hermite(k, u):
     return sp.special.eval_hermitenorm(k, u) / np.sqrt(np.math.factorial(k))
 
 def teacher_1d(u):
-    # u0 = 1.
-    # u = u - u0
+    # return hermite(3, u)
+    u0 = 1.
+    u = u - u0
     return np.clip(u + 2, a_min=0, a_max=None) - 2 * np.clip(u + 1, a_min=0, a_max=None) + 2 * np.clip(u - 1, a_min=0, a_max=None) - np.clip(u - 2, a_min=0, a_max=None)
 
 def hermite_coef(k):
     u = np.random.randn(1000000)
     return np.mean(teacher_1d(u) * hermite(k, u))
+
+def student(c, b, u):
+    return jnp.dot(c, jnp.clip(u - b, a_min=0)) / jnp.sqrt(b.shape[0])
+
+student = vmap(student, (None, None, 0))
+
+def hermite_coef_student(c, b, k):
+    u = np.random.randn(1000000)
+    return np.mean(student(c, b, u) * hermite(k, u))
 
 def fstar(x, s=None):
     px = x[:,0] # project
@@ -34,9 +44,15 @@ def fstar(x, s=None):
 
 def net(c, theta, b, x):
     px = jnp.dot(theta, x)
-    return jnp.dot(c, jnp.clip(px - b, a_min=0))
+    return jnp.dot(c, jnp.clip(px - b, a_min=0)) / jnp.sqrt(b.shape[0])
 
 net = vmap(net, (None, None, None, 0))
+
+def features(theta, b, x):
+    px = jnp.dot(theta, x)
+    return jnp.clip(px - b, a_min=0) / jnp.sqrt(b.shape[0])
+
+features = vmap(features, (None, None, 0))
 
 def loss(c, theta, b, x, y, lmbda):
     pred = net(c, theta, b, x)
@@ -45,7 +61,8 @@ def loss(c, theta, b, x, y, lmbda):
 lossgrads = jit(grad(loss, (0, 1)))
 
 
-n_total = 30000
+n_total = 100000
+n_test = 10000
 
 data_cache = {}
 def get_data(seed, d, sigma, s=None):
@@ -54,8 +71,8 @@ def get_data(seed, d, sigma, s=None):
         return data_cache[key]
 
     np.random.seed(seed)
-    X = np.random.randn(n_total, d)
-    y = fstar(X, s=s) + sigma * np.random.randn(n_total)
+    X = np.random.randn(2 * n_total, d)
+    y = fstar(X, s=s) + sigma * np.random.randn(2 * n_total)
     data_cache[key] = (X, y)
     return X, y
 
@@ -69,28 +86,59 @@ def run(config):
     step = config['step']
     tau = config['tau']
     X, y = get_data(config['seed'], d, config['sigma'], config.get('s'))
+    s = config.get('s', 1)
 
-    Xtr, Xte = X[:ntr], X[-10000:]
-    ytr, yte = y[:ntr], y[-10000:]
+    assert ntr + n_test <= n_total
+    Xtr, Xte = X[:ntr], X[n_total-10000:n_total]
+    ytr, yte = y[:ntr], y[n_total-10000:n_total]
+
+    Xtune = X[n_total:n_total+ntr]
+    ytune = y[n_total:n_total+ntr]
 
     theta = np.random.randn(d)
     theta /= np.linalg.norm(theta)
-    c = np.random.randn(N) / np.sqrt(N)
+    # c = np.random.randn(N) / np.sqrt(N)
+    c = np.random.randn(N)
     b = tau * np.random.randn(N)
+
+    if theta[0] < 0:
+        theta *= -1
+    # if hermite_coef(s) * hermite_coef_student(c, b, s) * theta[0] ** s < 0:
+    if hermite_coef(s) * hermite_coef_student(c, b, s) < 0:
+        c *= -1
+    print(theta[0], hermite_coef(s), hermite_coef_student(c, b, s))
+
+    def ridge_eval(theta, X, y, lmbda):
+        n = X.shape[0]
+        phi = features(theta, b, X)
+        c_ridge = np.linalg.solve(phi.T.dot(phi) + n * lmbda * np.eye(N), phi.T.dot(y))
+        testpreds_ridge = net(c_ridge, theta, b, Xte)
+        testloss_ridge = np.mean((yte - testpreds_ridge) ** 2)
+        return testloss_ridge
 
     ms = []
     test_losses = []
     for it in range(config['iters']):
-        gc, gth = lossgrads(c, theta, b, Xtr, ytr, lmbda)
-        theta -= 100 * step * gth
-        theta /= np.linalg.norm(theta)
-        c -= step * gc
-
         testpreds = net(c, theta, b, Xte)
         testloss = np.mean((yte - testpreds) ** 2)
-        print(abs(theta[0]), testloss)
+        if it % 20 == 0:
+            # print(np.linalg.norm(c))
+            testloss_ridge = ridge_eval(theta, Xtr, ytr, 0.001 * lmbda)
+            testloss_ridge_finetune = ridge_eval(theta, Xtune, ytune, 0.001 * lmbda)
+            # print(hermite_coef(s), hermite_coef_student(c, b, s))
+            print(it, theta[0], testloss, testloss_ridge, testloss_ridge_finetune)
         ms.append(abs(theta[0]))
         test_losses.append(testloss)
+
+        gc, gth = lossgrads(c, theta, b, Xtr, ytr, lmbda)
+        # if it < 10000:
+        theta -= 100. * step * gth
+        # else:
+        #     theta -= 20. * step * gth
+        theta /= np.linalg.norm(theta)
+        if it >= 500:
+            c -= step * gc
+
 
     idx = np.argmin(test_losses)
     return ms[idx], test_losses[idx]
@@ -118,19 +166,21 @@ if __name__ == '__main__':
     parser.add_argument('--step', type=float, default=0.001)
     parser.add_argument('--s', type=int, default=None)
     parser.add_argument('--d', type=int, default=10)
+    parser.add_argument('--iters', type=int, default=1000)
+    parser.add_argument('--seed', type=int, default=42)
 
     args = parser.parse_args()
 
     if not args.interactive:
-        os.makedirs(os.path.join('res', args.name), exist_ok=True)
-        outfile = os.path.join('res', args.name, f'out_{args.task_offset + args.task_id}.pkl')
+        os.makedirs(os.path.join('../single_index_nn/res', args.name), exist_ok=True)
+        outfile = os.path.join('../single_index_nn/res', args.name, f'out_{args.task_offset + args.task_id}.pkl')
 
     if args.interactive:
         grid = {'step': [args.step], 'N': [args.N], 'lmbda': [args.lmbda], 'ntr': [args.ntr]}
 
     from itertools import product
 
-    config = {'d': args.d, 'iters': 1000, 'sigma': 0.001, 'seed': 42, 'tau': 10., 's': args.s}
+    config = {'d': args.d, 'iters': args.iters, 'sigma': 0.01, 'seed': args.seed, 'tau': 10., 's': args.s}
 
     res = []
     for i, vals in enumerate(product(*grid.values())):
