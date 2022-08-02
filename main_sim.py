@@ -77,7 +77,7 @@ def get_data(seed, d, sigma, s=None):
     return X, y
 
 
-def run(config):
+def run(config, args):
     d = config['d']
     ntr = config['ntr']
     N = config['N']
@@ -85,7 +85,7 @@ def run(config):
     lmbda = config['lmbda']
     step = config['step']
     tau = config['tau']
-    X, y = get_data(config['seed'], d, config['sigma'], config.get('s'))
+    X, y = get_data(config['seed'] + config.get('rep', 0), d, config['sigma'], config.get('s'))
     s = config.get('s', 1)
 
     assert ntr + n_test <= n_total
@@ -119,16 +119,16 @@ def run(config):
     ms = []
     test_losses = []
     for it in range(config['iters']):
-        testpreds = net(c, theta, b, Xte)
-        testloss = np.mean((yte - testpreds) ** 2)
-        if it % 20 == 0:
+        if args.eval_delta > 0 and it % args.eval_delta == 0:
+            testpreds = net(c, theta, b, Xte)
+            testloss = np.mean((yte - testpreds) ** 2)
             # print(np.linalg.norm(c))
             testloss_ridge = ridge_eval(theta, Xtr, ytr, 0.001 * lmbda)
             testloss_ridge_finetune = ridge_eval(theta, Xtune, ytune, 0.001 * lmbda)
             # print(hermite_coef(s), hermite_coef_student(c, b, s))
             print(it, theta[0], testloss, testloss_ridge, testloss_ridge_finetune)
-        ms.append(abs(theta[0]))
-        test_losses.append(testloss)
+            ms.append(abs(theta[0]))
+            test_losses.append(testloss)
 
         gc, gth = lossgrads(c, theta, b, Xtr, ytr, lmbda)
         # if it < 10000:
@@ -139,17 +139,27 @@ def run(config):
         if it >= 500:
             c -= step * gc
 
-
-    idx = np.argmin(test_losses)
-    return ms[idx], test_losses[idx]
+    # idx = np.argmin(test_losses)
+    # return ms[idx], test_losses[idx]
+    testpreds = net(c, theta, b, Xte)
+    testloss = np.mean((yte - testpreds) ** 2)
+    testloss_ridge, testloss_finetune = [], []
+    for lmb in [1e-9, 1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1]:
+        testloss_ridge.append((lmb, ridge_eval(theta, Xtr, ytr, lmb)))
+        testloss_finetune.append((lmb, ridge_eval(theta, Xtune, ytune, lmb)))
+    return {'m': theta[0], 'testloss': testloss, 'testloss_ridge': testloss_ridge, 'testloss_finetune': testloss_finetune}
 
 
 grid = {
-    'step': [1e-4, 1e-3],
-    'N': [10, 100, 1000, 2000],
+    'd': [10, 20, 50, 100],
+    's': [1, 2, 3, 4],
+    'step': [1e-4, 1e-3, 1e-2],
+    'N': [10, 30, 100],
     # 'N': [5000],
-    'lmbda': [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 0.1],
-    'ntr': [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000],
+    # 'lmbda': [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 0.1],
+    'lmbda': [1e-4, 1e-3, 1e-2, 1e-1],
+    'ntr': [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000],
+    'rep': list(range(10)),
 }
 
 
@@ -166,21 +176,22 @@ if __name__ == '__main__':
     parser.add_argument('--step', type=float, default=0.001)
     parser.add_argument('--s', type=int, default=None)
     parser.add_argument('--d', type=int, default=10)
-    parser.add_argument('--iters', type=int, default=1000)
+    parser.add_argument('--iters', type=int, default=10000)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--eval_delta', type=int, default=-1)
 
     args = parser.parse_args()
 
     if not args.interactive:
-        os.makedirs(os.path.join('../single_index_nn/res', args.name), exist_ok=True)
-        outfile = os.path.join('../single_index_nn/res', args.name, f'out_{args.task_offset + args.task_id}.pkl')
+        os.makedirs(os.path.join('res', args.name), exist_ok=True)
+        outfile = os.path.join('res', args.name, f'out_{args.task_offset + args.task_id}.pkl')
 
     if args.interactive:
-        grid = {'step': [args.step], 'N': [args.N], 'lmbda': [args.lmbda], 'ntr': [args.ntr]}
+        grid = {'d': [args.d], 's': [args.s], 'step': [args.step], 'N': [args.N], 'lmbda': [args.lmbda], 'ntr': [args.ntr]}
 
     from itertools import product
 
-    config = {'d': args.d, 'iters': args.iters, 'sigma': 0.01, 'seed': args.seed, 'tau': 10., 's': args.s}
+    config = {'iters': args.iters, 'sigma': 0.01, 'seed': args.seed, 'tau': 10.}
 
     res = []
     for i, vals in enumerate(product(*grid.values())):
@@ -188,12 +199,15 @@ if __name__ == '__main__':
             continue
         kv = dict(zip(grid.keys(), vals))
         print(kv, flush=True)
-        config.update(kv)
+        cfg = config.copy()
+        cfg.update(kv)
 
-        m, testloss = run(config)
-        print(m, testloss)
+        # m, testloss = run(config, args)
+        # print(m, testloss)
+        out = run(cfg, args)
+        print(out['m'], out['testloss'])
 
-        res.append((config, m, testloss))
+        res.append((cfg, out))
         if not args.interactive:
             pickle.dump(res, open(outfile, 'wb'))
 
