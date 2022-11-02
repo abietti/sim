@@ -14,7 +14,7 @@ source /ext3/miniconda3/etc/profile.d/conda.sh;
 
 conda activate flp_nn;
 
-python ./main_sim.py $SLURM_ARRAY_TASK_ID $SLURM_ARRAY_TASK_COUNT --task_offset 0 --name it10k;
+python ./main_sim.py $SLURM_ARRAY_TASK_ID $SLURM_ARRAY_TASK_COUNT --task_offset 0 --name it10ksigned;
 
 "
 

@@ -21,14 +21,14 @@ def hermite_coef(k):
     u = np.random.randn(1000000)
     return np.mean(teacher_1d(u) * hermite(k, u))
 
-def student(c, b, u):
-    return jnp.dot(c, jnp.clip(u - b, a_min=0)) / jnp.sqrt(b.shape[0])
+def student(c, b, eps, u):
+    return jnp.dot(c, jnp.clip(eps * u - b, a_min=0)) / jnp.sqrt(b.shape[0])
 
-student = vmap(student, (None, None, 0))
+student = vmap(student, (None, None, None, 0))
 
-def hermite_coef_student(c, b, k):
+def hermite_coef_student(c, b, eps, k):
     u = np.random.randn(1000000)
-    return np.mean(student(c, b, u) * hermite(k, u))
+    return np.mean(student(c, b, eps, u) * hermite(k, u))
 
 def fstar(x, s=None):
     px = x[:,0] # project
@@ -42,20 +42,20 @@ def fstar(x, s=None):
 
 # fstar = jit(vmap(teacher))
 
-def net(c, theta, b, x):
+def net(c, theta, b, eps, x):
     px = jnp.dot(theta, x)
-    return jnp.dot(c, jnp.clip(px - b, a_min=0)) / jnp.sqrt(b.shape[0])
+    return jnp.dot(c, jnp.clip(eps * px - b, a_min=0)) / jnp.sqrt(b.shape[0])
 
-net = vmap(net, (None, None, None, 0))
+net = vmap(net, (None, None, None, None, 0))
 
-def features(theta, b, x):
+def features(theta, b, eps, x):
     px = jnp.dot(theta, x)
-    return jnp.clip(px - b, a_min=0) / jnp.sqrt(b.shape[0])
+    return jnp.clip(eps * px - b, a_min=0) / jnp.sqrt(b.shape[0])
 
-features = vmap(features, (None, None, 0))
+features = vmap(features, (None, None, None, 0))
 
-def loss(c, theta, b, x, y, lmbda):
-    pred = net(c, theta, b, x)
+def loss(c, theta, b, eps, x, y, lmbda):
+    pred = net(c, theta, b, eps, x)
     return jnp.mean((y - pred) ** 2) + lmbda * jnp.dot(c, c)
 
 lossgrads = jit(grad(loss, (0, 1)))
@@ -100,19 +100,21 @@ def run(config, args):
     # c = np.random.randn(N) / np.sqrt(N)
     c = np.random.randn(N)
     b = tau * np.random.randn(N)
+    eps = np.ones(N)  # random signs
+    eps[np.random.rand(N) < 0.5] = -1
 
     if theta[0] < 0:
         theta *= -1
     # if hermite_coef(s) * hermite_coef_student(c, b, s) * theta[0] ** s < 0:
-    if hermite_coef(s) * hermite_coef_student(c, b, s) < 0:
+    if hermite_coef(s) * hermite_coef_student(c, b, eps, s) < 0:
         c *= -1
-    print(theta[0], hermite_coef(s), hermite_coef_student(c, b, s))
+    print(theta[0], hermite_coef(s), hermite_coef_student(c, b, eps, s))
 
     def ridge_eval(theta, X, y, lmbda):
         n = X.shape[0]
-        phi = features(theta, b, X)
+        phi = features(theta, b, eps, X)
         c_ridge = np.linalg.solve(phi.T.dot(phi) + n * lmbda * np.eye(N), phi.T.dot(y))
-        testpreds_ridge = net(c_ridge, theta, b, Xte)
+        testpreds_ridge = net(c_ridge, theta, b, eps, Xte)
         testloss_ridge = np.mean((yte - testpreds_ridge) ** 2)
         return testloss_ridge
 
@@ -120,7 +122,7 @@ def run(config, args):
     test_losses = []
     for it in range(config['iters']):
         if args.eval_delta > 0 and it % args.eval_delta == 0:
-            testpreds = net(c, theta, b, Xte)
+            testpreds = net(c, theta, b, eps, Xte)
             testloss = np.mean((yte - testpreds) ** 2)
             # print(np.linalg.norm(c))
             testloss_ridge = ridge_eval(theta, Xtr, ytr, 0.001 * lmbda)
@@ -130,7 +132,7 @@ def run(config, args):
             ms.append(abs(theta[0]))
             test_losses.append(testloss)
 
-        gc, gth = lossgrads(c, theta, b, Xtr, ytr, lmbda)
+        gc, gth = lossgrads(c, theta, b, eps, Xtr, ytr, lmbda)
         # if it < 10000:
         theta -= 100. * step * gth
         # else:
@@ -141,7 +143,7 @@ def run(config, args):
 
     # idx = np.argmin(test_losses)
     # return ms[idx], test_losses[idx]
-    testpreds = net(c, theta, b, Xte)
+    testpreds = net(c, theta, b, eps, Xte)
     testloss = np.mean((yte - testpreds) ** 2)
     testloss_ridge, testloss_finetune = [], []
     for lmb in [1e-9, 1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1]:

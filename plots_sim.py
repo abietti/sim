@@ -27,7 +27,7 @@ if __name__ == '__main__':
     args.d = [int(d) for d in args.d.split(',')]
     args.s = [int(s) for s in args.s.split(',')]
 
-    outname = args.name
+    outname = os.path.join('figures', args.name)
 
     if len(args.d) > 1:
         ds_label = [(d, args.s[0], f'd = {d}') for d in args.d]
@@ -134,8 +134,10 @@ if __name__ == '__main__':
         if args.best_only:
             vals = list(dff.min().items())
         else:
-            vals = list(dff.mean().items())
-        std = np.array(dff.std())
+            # vals = list(dff.mean().items())
+            # std = np.array(dff.std())
+            vals = list(dff.apply(lambda x: np.sort(x)[:-1].mean()).items())
+            std = np.array(dff.apply(lambda x: np.sort(x)[:-1].std()))
         # vals.sort()
         ns, vs = list(zip(*vals))
         vs = np.array(vs) - args.sigma**2
